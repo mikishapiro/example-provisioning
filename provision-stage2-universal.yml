@@ -1,0 +1,32 @@
+---
+
+
+- name: Apply common configuration to the nodes and install base packages
+  hosts: all
+  tasks:
+    - name: Tell satellite to set parmeter list to only stage_2_in_progress_flag
+      include_role:
+        name: satellite-parameters
+      vars:
+        rolevar_fqdn: "{{ var_hostname }}.{{ var_domain}}"
+        rolevar_list_of_dicts_with_name_and_value_fields_each:
+          - name: stage_2_in_progress_flag
+            value: true
+
+#    - name: Include the SOE includable contents
+#      include: soe-playbook.yml
+
+#    - name: perform SCAP compliance scan
+#      include_role:
+#        name: satellite-compliance-scan
+
+    - name: Tell satellite to set parmeter list to only operational_system_under_ansible_control
+      include_role:
+        name: satellite-parameters
+      vars:
+        rolevar_fqdn: "{{ var_hostname }}.{{ var_domain}}"
+        rolevar_list_of_dicts_with_name_and_value_fields_each:
+          - name: operational_system_under_ansible_control
+            value: true
+    
+...

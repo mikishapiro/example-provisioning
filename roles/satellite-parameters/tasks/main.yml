@@ -1,0 +1,42 @@
+---
+
+    - name: Find host id
+      delegate_to: localhost
+      uri:
+        url: "{{ satellite }}/api/organizations/1/hosts??search={{ rolevar_fqdn }}"
+        return_contents: yes
+        method: GET
+        user: "{{ sat_api_username }}"
+        password: "{{ sat_api_password }}"
+        force_basic_auth: yes
+        validate_certs: no
+      register: json_response_hosts
+
+    - name: Find our host in response
+      set_fact:
+        host_id: "{{ item.id }}"
+      when: item.name == "{{ rolevar_fqdn }}"
+      with_items: "{{ json_response_hosts.json.results }}"
+    
+    - name: put intended host parameters in a dict
+      set_fact:
+        new_host_parameters:
+          host:
+            host_parameters_attributes: "{{ rolevar_list_of_dicts_with_name_and_value_fields_each }}"
+
+    - name: Tell satellite to set parmeter list
+      delegate_to: localhost
+      uri:
+        body: "{{ new_host_parameters }}"
+        url: "{{ satellite }}/api/hosts/{{ host_id }}"
+        user: "{{ sat_api_username }}"
+        password: "{{ sat_api_password }}"
+        return_contents: yes
+        method: PUT
+        force_basic_auth: yes
+        validate_certs: no
+        body_format: json
+        headers:
+          Content-Type: application/json
+          Accept: application/json,version=2
+...

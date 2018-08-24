@@ -1,0 +1,182 @@
+---
+- name: Set up a new VM Playbook
+  hosts: localhost
+
+  vars:
+    satellite_hostname: "satellite.example.com"
+    vmware_dc: "MyDC"
+    vmware_template: "MyTemplate"
+    vmware_vm_folder: "MyFolder"
+    vmware_cluster: "MyCluster"
+    vmware_resource_pool: "MyResourcePool"
+  tasks:
+    # Note this playbook assumes an Ansible Tower survey asked the user for:
+    # var_hostname (the hostname of the client system to be provisioned)
+    # var_hostgroup (the hostgroup that determines what the client system will become)
+    # var_domain (the domain part of the client's FQDN)
+
+    # Note this playbook requires setting up the following credentials in Ansible Tower:
+    # A Satellite 6 API custom credential (separate to the Satellite 6 cred used to sync Dyncamic Inventory) which provides sat_api_username and sat_api_password
+    # A VMware Vcenter credential to a Vcenter service accout with authority to create new VMs from templates
+    # A machine credential that will be able to log on (and sudo if it isn't root) to the client being provisioned
+    
+    # This task creates a new VM from a template in Vmware and registers the output in the 'deploy' variable
+    # Note that the vCenter hostname and associated credentials are used from a credential configured in Ansible Tower, and never mentioned here.
+    - name: Set up a new VM
+      delegate_to: localhost
+      vmware_guest:
+        validate_certs: false
+        name: "{{ var_hostname }}"
+        datacenter: "{{ vmware_dc }}"
+        folder: "{{ vmware_vm_folder }}"
+        template: "{{ vmware_template }}"
+        cluster: "{{ vmware_cluster }}"
+        resource_pool: "{{ vmware_resource_pool }}"
+        state: poweredon
+      register: vm_facts
+
+    # This task allows commenting out the previous VM creation task and recycling the facts from an existing VM when testing provisioning:
+    # Note that the vCenter hostname and associated credentials are used from a credential configured in Ansible Tower, and never mentioned here.
+    - name: Get VM facts
+      delegate_to: localhost
+      vmware_guest_facts:
+        validate_certs: false
+        datacenter: "{{ vmware_dc }}"
+        name: "{{ var_hostname }}"
+        folder: "{{ vmware_vm_folder }}"
+      register: vm_facts
+   
+    # Show in the output what we got from Vmware
+    - name: Show VM facts
+      debug: var=vm_facts
+    
+    # The following tasks uses the uri module to find the Satellite Hostgroup ID
+    - name: Find hostgroups id in Satellite
+      uri:
+        url: "https://{{ satellite_hostname }}/api/organizations/1/hostgroups?search={{ var_hostgroup }}"
+        return_contents: yes
+        method: GET
+        user: "{{ sat_api_username }}"
+        password: "{{ sat_api_password }}"
+        force_basic_auth: yes
+        validate_certs: no
+      register: json_response_hostgroups
+
+    - name: Find hostgroup in the response
+      set_fact:
+        hostgroup_id: "{{ item.id }}"
+      when: item.title == "{{ var_hostgroup }}"
+      with_items: "{{ json_response_hostgroups.json.results }}"
+
+    
+    # The following task grabs full details of the hostgroup as some fields will be required to create a discovery rule
+    - name: Obtain necessary hostgroup details
+      uri:
+        url: "https://{{  satellite_hostname }}/api/hostgroups/{{ hostgroup_id }}"
+        return_contents: yes
+        method: GET
+        user: "{{ sat_api_username }}"
+        password: "{{ sat_api_password }}"
+        force_basic_auth: yes
+        validate_certs: no
+      register: json_response_hostgroup_details
+
+    # Show in the output the hostgroup information, as this is the blueprint to provision the new client system:
+    - name: The following hostgroup information was found
+      debug: var=json_response_hostgroup_details
+  
+    # Assemble the dict that will be used to create the discovery rule
+    # Dict is made up of the survey-provided hostname, the vmware-provided mac address and the satellite-provided location
+    # The organization ID is currently baked in, this can be fixed in the future
+    - name: set variables to be used in creating a discovery rule in a dict
+      set_fact: 
+        newhost:
+          name: "discorule-{{ vm_facts.instance.hw_eth0.macaddress }}"
+          hostname: "{{ var_hostname }}"
+          hostgroup_id: "{{ hostgroup_id }}"
+          search: "mac = {{ vm_facts.instance.hw_eth0.macaddress }}"
+          organizations:
+            - id: 1
+          locations: "{{ json_response_hostgroup_details.json.locations }}"
+
+    # Show in output how the discovery rule will look
+    - name: About to create a discovery rule in Satellite with the following facts
+      debug: var=newhost
+
+    # Use the uri module to call the Satellite API to create the discovery rule:
+    # Note the non-default status code we expect from this GET call
+    - name: Create a discovery rule in Satellite
+      register: discovery_rule_output
+      uri:
+        body: "{{ newhost }}"
+        url: "https://{{ satellite_hostname }}/api/v2/discovery_rules"
+        return_contents: yes
+        method: POST
+        user: "{{ sat_api_username }}"
+        password: "{{ sat_api_password }}"
+        force_basic_auth: yes
+        validate_certs: no
+        body_format: json
+        headers:
+          Content-Type: application/json
+          Accept: application/json,version=2
+        status_code: 201
+
+    # Show in the output how we did
+    - name: Discovery Rule Information
+      debug: var=discovery_rule_output.json
+
+    # At this point the VM is powered on and will have booted into the Foreman Discovery Image and called home, thus appearing in Discovererd Hosts on Satellite
+    # At this point, a discovery rule for its mac address is also in play.
+    # 
+    # IMPORTANT NOTE 1: This playbook requires auto-provisioning in Satellite be set to YES ( UI -> Administer -> Settings -> Discovered -> Auto-Provisioning )
+    # 
+    # IMPORTANT NOTE 2: If the Foreman Discovery Image used plus any available DHCP is insufficient to grant the client a network identity that can contact Satellite, 
+    # at this point a manual step is required to log on to the console of the client system VM and provide IP settings that can be used to reach Satellite.
+
+    # The following step will wait for any manual steps required, plus the 5 or so minutes needed to conduct the build and reboot the client system
+    # Then start attempting to contact the client. If contact cannot be made over one hour, abort the process:
+    - name: Wait for build to complete
+      delegate_to: "{{ var_hostname }}"
+      wait_for_connection:
+        delay: 300
+        timeout: 3600
+        sleep: 10
+        connection_timeout: 30
+
+    # If we got here, we have a provisioned client :) 
+
+    # Keep our Satellite tidy. Use the uri module to call the Satellite API to delete the discovery rule:
+    - name: Delete the discovery rule in Satellite
+      uri:
+        url: "https://{{ satellite_hostname }} /api/v2/discovery_rules/{{ discovery_rule_output.json.id }}"
+        user: "{{ sat_api_username }}"
+        password: "{{ sat_api_password }}"
+        return_contents: yes
+        method: DELETE
+        force_basic_auth: yes
+        validate_certs: no
+        body_format: json
+        headers:
+          Content-Type: application/json
+          Accept: application/json,version=2
+
+    # This last step uses the accompanying satellite_parameters role to mark the system as ready for stage2
+    # In Satellite/Foreman, the record of this system carries separate sections with 
+    #   the parameters set specifically on this client system
+    #   the parameters it inherited
+    # This role will wipe out the former section (presumably empty at this stage) and replace it with the literal list of dicts specified below
+    # In this case, the list has one member - The stage_1_complete_flag. 
+    # The workflow that called this Stage 1 is expected to perform a dynamic inventory sync next (whereby Ansible will get a full record from Satellite/Foreman about our new client)
+    # The workflow will then execute the stage2 Job Template using 
+    #   variables.icontains:stage_1_complete_flag
+    # to isolate this client system and run solely on it.
+    - name: Tell satellite to set parmeter list to only stage_1_complete_flag
+      include_role:
+        name: satellite-parameters
+      vars: 
+        rolevar_fqdn: "{{ var_hostname }}.{{ var_domain}}"
+        rolevar_list_of_dicts_with_name_and_value_fields_each:
+          - name: stage_1_complete_flag
+            value: true
+...
