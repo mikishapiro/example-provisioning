@@ -1,6 +1,14 @@
 ---
 
+# This playbook is intended to be used as the second provisioning stage, executing any remaining tasks on the provisioned systems
 
+
+# The first step uses the accompanying satellite_parameters role to prevent stage2 from running on this client system twice if invoked again for any reason. 
+# In Satellite/Foreman, the record of this system carries separate sections with 
+#   the parameters set specifically on this client system
+#   the parameters it inherited
+# This role will wipe out the former section (populated only with stage_1_complete_flag at this stage) and replace it with the literal list of dicts specified below
+# In this case, the list has one member - The stage_2_in_progress_flag parameter. 
 - name: Apply common configuration to the nodes and install base packages
   hosts: all
   tasks:
@@ -13,13 +21,22 @@
           - name: stage_2_in_progress_flag
             value: true
 
+# Tasks that implement SOE functions can now be called. 
+# It is not recommended to embed SOE tasks in the provisioning process, as it will not be easy to apply them outside it. 
+# Rather, it may be better to have them defined in soe-playbook.yml, and include this playbook from both here and CM:
 #    - name: Include the SOE includable contents
 #      include: soe-playbook.yml
 
+# Roles can also be called, using the include_role module.
+# In the following example, a compliance scan role is invoked after CM was applied:
 #    - name: perform SCAP compliance scan
 #      include_role:
 #        name: satellite-compliance-scan
 
+# Finally, we use our trusty satellite-parameters role to remove the currently set flag and flag the system as operational. 
+# Configuration Management (CM) runs of Ansible can then be applied to a Smart Inventory that uses 
+#   variables.icontains:operational_system_under_ansible_control 
+# as its filter, to isolate all clients that have been thus operationalised
     - name: Tell satellite to set parmeter list to only operational_system_under_ansible_control
       include_role:
         name: satellite-parameters
